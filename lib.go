@@ -317,8 +317,11 @@ func convertError(err error) error {
 	if os.IsPermission(err) {
 		return fuse.EPERM
 	}
-	if errors.Is(err, os.ErrInvalid) || errors.Is(err, os.ErrClosed) {
+	if errors.Is(err, os.ErrInvalid) || errors.Is(err, os.ErrClosed) || errors.Is(err, billy.ErrCrossedBoundary) {
 		return fuse.Errno(syscall.EINVAL)
+	}
+	if errors.Is(err, billy.ErrNotSupported) {
+		return fuse.ENOTSUP
 	}
 	return fuse.EIO
 }
