@@ -215,6 +215,9 @@ func (n *node) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	if err := n.root.callHook(ctx, req); err != nil {
 		return nil, convertError(err)
 	}
+	if req.Dir {
+		return &dirHandle{root: n.root, path: n.path}, nil
+	}
 	fh, err := n.root.underlying.OpenFile(n.path, int(req.Flags), 0777)
 	if err != nil {
 		return nil, convertError(err)
@@ -277,13 +280,20 @@ func (h *handle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	return convertError(h.fh.Close())
 }
 
-func (n *node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	if dfs, ok := n.root.underlying.(billy.Dir); ok {
-		entries, err := dfs.ReadDir(n.path)
+type dirHandle struct {
+	root *root
+	path string
+}
+
+var _ fs.HandleReadDirAller = &dirHandle{}
+
+func (h *dirHandle) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	if dfs, ok := h.root.underlying.(billy.Dir); ok {
+		entries, err := dfs.ReadDir(h.path)
 		if err != nil {
 			return nil, convertError(err)
 		}
-		ret := make([]fuse.Dirent, 0, len(entries))
+		ret := make([]fuse.Dirent, len(entries))
 		for i, e := range entries {
 			t := fuse.DT_File
 			if e.IsDir() {
