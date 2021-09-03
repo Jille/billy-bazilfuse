@@ -16,14 +16,26 @@ import (
 	"github.com/go-git/go-billy/v5"
 )
 
-func New(underlying billy.Basic) fs.FS {
+// CallHook is the callback you can get before every call from FUSE, before it's passed to Billy.
+type CallHook func(ctx context.Context, req fuse.Request) error
+
+// New creates a fuse/fs.FS that passes all calls through to the given filesystem.
+// callHook is called before every call from FUSE, and can be nil.
+func New(underlying billy.Basic, callHook CallHook) fs.FS {
+	if callHook == nil {
+		callHook = func(ctx context.Context, req fuse.Request) error {
+			return nil
+		}
+	}
 	return &root{
 		underlying: underlying,
+		callHook:   callHook,
 	}
 }
 
 type root struct {
 	underlying billy.Basic
+	callHook   CallHook
 }
 
 func (r *root) Root() (fs.Node, error) {
@@ -42,7 +54,7 @@ var _ fs.NodeOpener = &node{}
 var _ fs.NodeReadlinker = &node{}
 var _ fs.NodeRemover = &node{}
 var _ fs.NodeRenamer = &node{}
-var _ fs.NodeStringLookuper = &node{}
+var _ fs.NodeRequestLookuper = &node{}
 var _ fs.NodeSymlinker = &node{}
 
 func (n *node) Attr(ctx context.Context, attr *fuse.Attr) error {
@@ -60,11 +72,17 @@ func fileInfoToAttr(fi os.FileInfo, out *fuse.Attr) {
 	out.Mtime = fi.ModTime()
 }
 
-func (n *node) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	return &node{n.root, path.Join(n.path, name)}, nil
+func (n *node) Lookup(ctx context.Context, req *fuse.LookupRequest, resp *fuse.LookupResponse) (fs.Node, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return nil, convertError(err)
+	}
+	return &node{n.root, path.Join(n.path, req.Name)}, nil
 }
 
 func (n *node) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return nil, convertError(err)
+	}
 	if dfs, ok := n.root.underlying.(billy.Dir); ok {
 		fn := path.Join(n.path, req.Name)
 		if err := dfs.MkdirAll(fn, os.FileMode(req.Mode)); err != nil {
@@ -77,11 +95,17 @@ func (n *node) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, erro
 
 // Unlink removes a file.
 func (n *node) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	return convertError(n.root.underlying.Remove(n.path))
 }
 
 // Symlink creates a symbolic link.
 func (n *node) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return nil, convertError(err)
+	}
 	if sfs, ok := n.root.underlying.(billy.Symlink); ok {
 		fn := path.Join(n.path, req.NewName)
 		if err := sfs.Symlink(req.Target, fn); err != nil {
@@ -94,6 +118,9 @@ func (n *node) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, 
 
 // Readlink reads the target of a symbolic link.
 func (n *node) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return "", convertError(err)
+	}
 	if sfs, ok := n.root.underlying.(billy.Symlink); ok {
 		fn, err := sfs.Readlink(n.path)
 		if err != nil {
@@ -106,10 +133,16 @@ func (n *node) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 
 // Rename renames a file.
 func (n *node) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	return convertError(n.root.underlying.Rename(path.Join(n.path, req.OldName), path.Join(newDir.(*node).path, req.NewName)))
 }
 
 func (n *node) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	if req.Valid.AtimeNow() {
 		req.Valid |= fuse.SetattrAtime
 		req.Atime = time.Now()
@@ -167,23 +200,30 @@ func (n *node) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 }
 
 func (n *node) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return nil, nil, convertError(err)
+	}
 	fn := path.Join(n.path, req.Name)
 	fh, err := n.root.underlying.OpenFile(fn, int(req.Flags), req.Mode)
 	if err != nil {
 		return nil, nil, convertError(err)
 	}
-	return &node{n.root, fn}, &handle{fh: fh}, nil
+	return &node{n.root, fn}, &handle{root: n.root, fh: fh}, nil
 }
 
 func (n *node) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	if err := n.root.callHook(ctx, req); err != nil {
+		return nil, convertError(err)
+	}
 	fh, err := n.root.underlying.OpenFile(n.path, int(req.Flags), 0777)
 	if err != nil {
 		return nil, convertError(err)
 	}
-	return &handle{fh: fh}, nil
+	return &handle{root: n.root, fh: fh}, nil
 }
 
 type handle struct {
+	root      *root
 	fh        billy.File
 	writeLock sync.Mutex
 }
@@ -193,6 +233,9 @@ var _ fs.HandleReleaser = &handle{}
 var _ fs.HandleWriter = &handle{}
 
 func (h *handle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	if err := h.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	resp.Data = make([]byte, req.Size)
 	n, err := h.fh.ReadAt(resp.Data, req.Offset)
 	if err == io.EOF {
@@ -203,6 +246,9 @@ func (h *handle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.Rea
 }
 
 func (h *handle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	if err := h.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	if wa, ok := h.fh.(io.WriterAt); ok {
 		n, err := wa.WriteAt(req.Data, req.Offset)
 		if err != nil {
@@ -225,6 +271,9 @@ func (h *handle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.W
 }
 
 func (h *handle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	if err := h.root.callHook(ctx, req); err != nil {
+		return convertError(err)
+	}
 	return convertError(h.fh.Close())
 }
 
@@ -255,6 +304,9 @@ func (n *node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 func convertError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if _, ok := err.(fuse.ErrorNumber); ok {
+		return err
 	}
 	if os.IsExist(err) {
 		return fuse.EEXIST
