@@ -193,9 +193,8 @@ func (n *node) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 			return convertError(err)
 		}
 	}
-	if req.Valid.Handle() || req.Valid.LockOwner() {
-		return fuse.ENOTSUP
-	}
+	// TODO: if req.Valid.Handle()
+	// TODO: if req.Valid.LockOwner()
 	return nil
 }
 
