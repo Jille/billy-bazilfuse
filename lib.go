@@ -98,7 +98,7 @@ func (n *node) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if err := n.root.callHook(ctx, req); err != nil {
 		return convertError(err)
 	}
-	return convertError(n.root.underlying.Remove(n.path))
+	return convertError(n.root.underlying.Remove(path.Join(n.path, req.Name)))
 }
 
 // Symlink creates a symbolic link.
